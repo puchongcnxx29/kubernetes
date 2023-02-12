@@ -40,19 +40,20 @@ type pruner struct {
 	resources         []prune.Resource
 }
 
-func newPruner(dc dynamic.Interface, m meta.RESTMapper, r []prune.Resource) *pruner {
+func newPruner(dc dynamic.Interface, m meta.RESTMapper, r []prune.Resource, selector string) *pruner {
 	return &pruner{
 		visitedUids:       sets.NewString(),
 		visitedNamespaces: sets.NewString(),
 		dynamicClient:     dc,
 		mapper:            m,
 		resources:         r,
+		labelSelector:     selector,
 	}
 }
 
-func (p *pruner) pruneAll() ([]runtime.Object, error) {
+func (p *pruner) pruneAll(namespaceSpecified bool) ([]runtime.Object, error) {
 	var allPruned []runtime.Object
-	namespacedRESTMappings, nonNamespacedRESTMappings, err := prune.GetRESTMappings(p.mapper, p.resources)
+	namespacedRESTMappings, nonNamespacedRESTMappings, err := prune.GetRESTMappings(p.mapper, p.resources, namespaceSpecified)
 	if err != nil {
 		return allPruned, fmt.Errorf("error retrieving RESTMappings to prune: %v", err)
 	}

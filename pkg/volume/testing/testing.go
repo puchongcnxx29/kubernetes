@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -183,6 +184,7 @@ type FakeVolumePlugin struct {
 	SupportsRemount        bool
 	SupportsSELinux        bool
 	DisableNodeExpansion   bool
+	CanSupportFn           func(*volume.Spec) bool
 
 	// default to false which means it is attachable by default
 	NonAttachable bool
@@ -269,7 +271,10 @@ func (plugin *FakeVolumePlugin) GetVolumeName(spec *volume.Spec) (string, error)
 }
 
 func (plugin *FakeVolumePlugin) CanSupport(spec *volume.Spec) bool {
-	// TODO: maybe pattern-match on spec.Name() to decide?
+	if plugin.CanSupportFn != nil {
+		return plugin.CanSupportFn(spec)
+	}
+
 	return true
 }
 
@@ -451,10 +456,12 @@ func (plugin *FakeVolumePlugin) GetAccessModes() []v1.PersistentVolumeAccessMode
 	return []v1.PersistentVolumeAccessMode{}
 }
 
-func (plugin *FakeVolumePlugin) ConstructVolumeSpec(volumeName, mountPath string) (*volume.Spec, error) {
-	return &volume.Spec{
-		Volume: &v1.Volume{
-			Name: volumeName,
+func (plugin *FakeVolumePlugin) ConstructVolumeSpec(volumeName, mountPath string) (volume.ReconstructedVolume, error) {
+	return volume.ReconstructedVolume{
+		Spec: &volume.Spec{
+			Volume: &v1.Volume{
+				Name: volumeName,
+			},
 		},
 	}, nil
 }
@@ -526,7 +533,7 @@ func (f *FakeBasicVolumePlugin) CanSupport(spec *volume.Spec) bool {
 	return strings.HasPrefix(spec.Name(), f.GetPluginName())
 }
 
-func (f *FakeBasicVolumePlugin) ConstructVolumeSpec(ame, mountPath string) (*volume.Spec, error) {
+func (f *FakeBasicVolumePlugin) ConstructVolumeSpec(ame, mountPath string) (volume.ReconstructedVolume, error) {
 	return f.Plugin.ConstructVolumeSpec(ame, mountPath)
 }
 
@@ -647,8 +654,8 @@ func (plugin *FakeFileVolumePlugin) NewUnmounter(name string, podUID types.UID) 
 	return nil, nil
 }
 
-func (plugin *FakeFileVolumePlugin) ConstructVolumeSpec(volumeName, mountPath string) (*volume.Spec, error) {
-	return nil, nil
+func (plugin *FakeFileVolumePlugin) ConstructVolumeSpec(volumeName, mountPath string) (volume.ReconstructedVolume, error) {
+	return volume.ReconstructedVolume{}, nil
 }
 
 func NewFakeFileVolumePlugin() []volume.VolumePlugin {
@@ -1263,6 +1270,11 @@ func (fv *FakeVolumePathHandler) GetLoopDevice(path string) (string, error) {
 // FindEmptyDirectoryUsageOnTmpfs finds the expected usage of an empty directory existing on
 // a tmpfs filesystem on this system.
 func FindEmptyDirectoryUsageOnTmpfs() (*resource.Quantity, error) {
+	// The command below does not exist on Windows. Additionally, empty folders have size 0 on Windows.
+	if goruntime.GOOS == "windows" {
+		used, err := resource.ParseQuantity("0")
+		return &used, err
+	}
 	tmpDir, err := utiltesting.MkTmpdir("metrics_du_test")
 	if err != nil {
 		return nil, err
@@ -1507,24 +1519,6 @@ func VerifyZeroDetachCallCount(fakeVolumePlugin *FakeVolumePlugin) error {
 	}
 
 	return nil
-}
-
-// VerifySetUpDeviceCallCount ensures that at least one of the Mappers for this
-// plugin has the expectedSetUpDeviceCallCount number of calls. Otherwise it
-// returns an error.
-func VerifySetUpDeviceCallCount(
-	expectedSetUpDeviceCallCount int,
-	fakeVolumePlugin *FakeVolumePlugin) error {
-	for _, mapper := range fakeVolumePlugin.GetBlockVolumeMapper() {
-		actualCallCount := mapper.GetSetUpDeviceCallCount()
-		if actualCallCount >= expectedSetUpDeviceCallCount {
-			return nil
-		}
-	}
-
-	return fmt.Errorf(
-		"No Mapper have expected SetUpDeviceCallCount. Expected: <%v>.",
-		expectedSetUpDeviceCallCount)
 }
 
 // VerifyTearDownDeviceCallCount ensures that at least one of the Unmappers for this

@@ -37,6 +37,8 @@ import (
 // TODO move to API machinery and re-unify with kubelet/server/portfoward
 const PortForwardProtocolV1Name = "portforward.k8s.io"
 
+var ErrLostConnectionToPod = errors.New("lost connection to pod")
+
 // PortForwarder knows how to listen for local connections and forward them to
 // a remote pod via an upgraded HTTP request.
 type PortForwarder struct {
@@ -230,7 +232,7 @@ func (pf *PortForwarder) forward() error {
 	select {
 	case <-pf.stopChan:
 	case <-pf.streamConn.CloseChan():
-		runtime.HandleError(errors.New("lost connection to pod"))
+		return ErrLostConnectionToPod
 	}
 
 	return nil
@@ -347,6 +349,7 @@ func (pf *PortForwarder) handleConnection(conn net.Conn, port ForwardedPort) {
 	}
 	// we're not writing to this stream
 	errorStream.Close()
+	defer pf.streamConn.RemoveStreams(errorStream)
 
 	errorChan := make(chan error)
 	go func() {
@@ -367,6 +370,7 @@ func (pf *PortForwarder) handleConnection(conn net.Conn, port ForwardedPort) {
 		runtime.HandleError(fmt.Errorf("error creating forwarding stream for port %d -> %d: %v", port.Local, port.Remote, err))
 		return
 	}
+	defer pf.streamConn.RemoveStreams(dataStream)
 
 	localError := make(chan struct{})
 	remoteDone := make(chan struct{})

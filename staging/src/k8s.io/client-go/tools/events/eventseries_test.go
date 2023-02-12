@@ -17,6 +17,7 @@ limitations under the License.
 package events
 
 import (
+	"context"
 	"strconv"
 	"testing"
 	"time"
@@ -29,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	fake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/kubernetes/scheme"
 	restclient "k8s.io/client-go/rest"
 	ref "k8s.io/client-go/tools/reference"
@@ -161,7 +163,10 @@ func TestEventSeriesf(t *testing.T) {
 	// Don't call StartRecordingToSink, as we don't need neither refreshing event
 	// series nor finishing them in this tests and additional events updated would
 	// race with our expected ones.
-	broadcaster.startRecordingEvents(stopCh)
+	err = broadcaster.startRecordingEvents(stopCh)
+	if err != nil {
+		t.Fatal(err)
+	}
 	recorder.Eventf(regarding, related, isomorphicEvent.Type, isomorphicEvent.Reason, isomorphicEvent.Action, isomorphicEvent.Note, []interface{}{1})
 	// read from the chan as this was needed only to populate the cache
 	<-createEvent
@@ -180,6 +185,44 @@ func TestEventSeriesf(t *testing.T) {
 		}
 	}
 	close(stopCh)
+}
+
+// TestEventSeriesWithEventSinkImplRace verifies that when Events are emitted to
+// an EventSink consecutively there is no data race.  This test is meant to be
+// run with the `-race` option.
+func TestEventSeriesWithEventSinkImplRace(t *testing.T) {
+	kubeClient := fake.NewSimpleClientset()
+
+	eventSink := &EventSinkImpl{Interface: kubeClient.EventsV1()}
+	eventBroadcaster := NewBroadcaster(eventSink)
+
+	stopCh := make(chan struct{})
+	eventBroadcaster.StartRecordingToSink(stopCh)
+
+	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, "test")
+
+	recorder.Eventf(&v1.ObjectReference{}, nil, v1.EventTypeNormal, "reason", "action", "", "")
+	recorder.Eventf(&v1.ObjectReference{}, nil, v1.EventTypeNormal, "reason", "action", "", "")
+
+	err := wait.PollImmediate(100*time.Millisecond, 5*time.Second, func() (done bool, err error) {
+		events, err := kubeClient.EventsV1().Events(metav1.NamespaceDefault).List(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			return false, err
+		}
+
+		if len(events.Items) != 1 {
+			return false, nil
+		}
+
+		if events.Items[0].Series == nil {
+			return false, nil
+		}
+
+		return true, nil
+	})
+	if err != nil {
+		t.Fatal("expected that 2 identical Eventf calls would result in the creation of an Event with a Serie")
+	}
 }
 
 func validateEvent(messagePrefix string, expectedUpdate bool, actualEvent *eventsv1.Event, expectedEvent *eventsv1.Event, t *testing.T) {

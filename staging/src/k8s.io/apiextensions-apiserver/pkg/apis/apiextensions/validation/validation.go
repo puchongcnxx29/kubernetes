@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -34,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	apiservercel "k8s.io/apiserver/pkg/cel"
 	"k8s.io/apiserver/pkg/util/webhook"
 
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
@@ -1038,7 +1040,7 @@ func ValidateCustomResourceDefinitionOpenAPISchema(schema *apiextensions.JSONSch
 							celContext.TotalCost.ObserveExpressionCost(fldPath.Child("x-kubernetes-validations").Index(i).Child("rule"), expressionCost)
 						}
 						if cr.Error != nil {
-							if cr.Error.Type == cel.ErrorTypeRequired {
+							if cr.Error.Type == apiservercel.ErrorTypeRequired {
 								allErrs.CELErrors = append(allErrs.CELErrors, field.Required(fldPath.Child("x-kubernetes-validations").Index(i).Child("rule"), cr.Error.Detail))
 							} else {
 								allErrs.CELErrors = append(allErrs.CELErrors, field.Invalid(fldPath.Child("x-kubernetes-validations").Index(i).Child("rule"), schema.XValidations[i], cr.Error.Detail))
@@ -1363,6 +1365,27 @@ func HasSchemaWith(spec *apiextensions.CustomResourceDefinitionSpec, pred func(s
 	return false
 }
 
+var schemaPool = sync.Pool{
+	New: func() any {
+		return new(apiextensions.JSONSchemaProps)
+	},
+}
+
+func schemaHasRecurse(s *apiextensions.JSONSchemaProps, pred func(s *apiextensions.JSONSchemaProps) bool) bool {
+	if s == nil {
+		return false
+	}
+	schema := schemaPool.Get().(*apiextensions.JSONSchemaProps)
+	defer schemaPool.Put(schema)
+	*schema = *s
+	return SchemaHas(schema, pred)
+}
+
+// SchemaHas recursively traverses the Schema and calls the `pred`
+// predicate to see if the schema contains specific values.
+//
+// The predicate MUST NOT keep a copy of the json schema NOR modify the
+// schema.
 func SchemaHas(s *apiextensions.JSONSchemaProps, pred func(s *apiextensions.JSONSchemaProps) bool) bool {
 	if s == nil {
 		return false
@@ -1373,60 +1396,60 @@ func SchemaHas(s *apiextensions.JSONSchemaProps, pred func(s *apiextensions.JSON
 	}
 
 	if s.Items != nil {
-		if s.Items != nil && SchemaHas(s.Items.Schema, pred) {
+		if s.Items != nil && schemaHasRecurse(s.Items.Schema, pred) {
 			return true
 		}
-		for _, s := range s.Items.JSONSchemas {
-			if SchemaHas(&s, pred) {
+		for i := range s.Items.JSONSchemas {
+			if schemaHasRecurse(&s.Items.JSONSchemas[i], pred) {
 				return true
 			}
 		}
 	}
-	for _, s := range s.AllOf {
-		if SchemaHas(&s, pred) {
+	for i := range s.AllOf {
+		if schemaHasRecurse(&s.AllOf[i], pred) {
 			return true
 		}
 	}
-	for _, s := range s.AnyOf {
-		if SchemaHas(&s, pred) {
+	for i := range s.AnyOf {
+		if schemaHasRecurse(&s.AnyOf[i], pred) {
 			return true
 		}
 	}
-	for _, s := range s.OneOf {
-		if SchemaHas(&s, pred) {
+	for i := range s.OneOf {
+		if schemaHasRecurse(&s.OneOf[i], pred) {
 			return true
 		}
 	}
-	if SchemaHas(s.Not, pred) {
+	if schemaHasRecurse(s.Not, pred) {
 		return true
 	}
 	for _, s := range s.Properties {
-		if SchemaHas(&s, pred) {
+		if schemaHasRecurse(&s, pred) {
 			return true
 		}
 	}
 	if s.AdditionalProperties != nil {
-		if SchemaHas(s.AdditionalProperties.Schema, pred) {
+		if schemaHasRecurse(s.AdditionalProperties.Schema, pred) {
 			return true
 		}
 	}
 	for _, s := range s.PatternProperties {
-		if SchemaHas(&s, pred) {
+		if schemaHasRecurse(&s, pred) {
 			return true
 		}
 	}
 	if s.AdditionalItems != nil {
-		if SchemaHas(s.AdditionalItems.Schema, pred) {
+		if schemaHasRecurse(s.AdditionalItems.Schema, pred) {
 			return true
 		}
 	}
 	for _, s := range s.Definitions {
-		if SchemaHas(&s, pred) {
+		if schemaHasRecurse(&s, pred) {
 			return true
 		}
 	}
 	for _, d := range s.Dependencies {
-		if SchemaHas(d.Schema, pred) {
+		if schemaHasRecurse(d.Schema, pred) {
 			return true
 		}
 	}

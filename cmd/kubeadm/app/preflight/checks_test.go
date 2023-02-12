@@ -436,7 +436,7 @@ func TestRunChecks(t *testing.T) {
 	}
 	for _, rt := range tokenTest {
 		buf := new(bytes.Buffer)
-		actual := RunChecks(rt.p, buf, sets.NewString())
+		actual := RunChecks(rt.p, buf, sets.New[string]())
 		if (actual == nil) != rt.expected {
 			t.Errorf(
 				"failed RunChecks:\n\texpected: %t\n\t  actual: %t",
@@ -836,16 +836,16 @@ func TestKubeletVersionCheck(t *testing.T) {
 
 func TestSetHasItemOrAll(t *testing.T) {
 	var tests = []struct {
-		ignoreSet      sets.String
+		ignoreSet      sets.Set[string]
 		testString     string
 		expectedResult bool
 	}{
-		{sets.NewString(), "foo", false},
-		{sets.NewString("all"), "foo", true},
-		{sets.NewString("all", "bar"), "foo", true},
-		{sets.NewString("bar"), "foo", false},
-		{sets.NewString("baz", "foo", "bar"), "foo", true},
-		{sets.NewString("baz", "bar", "foo"), "Foo", true},
+		{sets.New[string](), "foo", false},
+		{sets.New("all"), "foo", true},
+		{sets.New("all", "bar"), "foo", true},
+		{sets.New("bar"), "foo", false},
+		{sets.New("baz", "foo", "bar"), "foo", true},
+		{sets.New("baz", "bar", "foo"), "Foo", true},
 	}
 
 	for _, rt := range tests {
@@ -895,7 +895,7 @@ func TestImagePullCheck(t *testing.T) {
 		},
 	}
 
-	fexec := fakeexec.FakeExec{
+	fexec := &fakeexec.FakeExec{
 		CommandScript: []fakeexec.FakeCommandAction{
 			func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
 			func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
@@ -919,7 +919,7 @@ func TestImagePullCheck(t *testing.T) {
 		LookPathFunc: func(cmd string) (string, error) { return "/usr/bin/crictl", nil },
 	}
 
-	containerRuntime, err := utilruntime.NewContainerRuntime(&fexec, constants.DefaultCRISocket)
+	containerRuntime, err := utilruntime.NewContainerRuntime(fexec, constants.DefaultCRISocket)
 	if err != nil {
 		t.Errorf("unexpected NewContainerRuntime error: %v", err)
 	}

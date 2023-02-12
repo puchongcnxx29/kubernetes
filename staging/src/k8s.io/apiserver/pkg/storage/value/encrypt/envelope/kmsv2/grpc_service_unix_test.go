@@ -25,9 +25,16 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apiserver/pkg/storage/value/encrypt/envelope/metrics"
 	mock "k8s.io/apiserver/pkg/storage/value/encrypt/envelope/testing/v2alpha1"
+	"k8s.io/component-base/metrics/testutil"
 
 	"k8s.io/apimachinery/pkg/util/uuid"
+	kmsservice "k8s.io/kms/service"
+)
+
+const (
+	testProviderName = "providerName"
 )
 
 type testSocket struct {
@@ -54,7 +61,9 @@ func TestKMSPluginLateStart(t *testing.T) {
 	callTimeout := 3 * time.Second
 	s := newEndpoint()
 
-	service, err := NewGRPCService(s.endpoint, callTimeout)
+	ctx := testContext(t)
+
+	service, err := NewGRPCService(ctx, s.endpoint, testProviderName, callTimeout)
 	if err != nil {
 		t.Fatalf("failed to create envelope service, error: %v", err)
 	}
@@ -72,7 +81,7 @@ func TestKMSPluginLateStart(t *testing.T) {
 
 	data := []byte("test data")
 	uid := string(uuid.NewUUID())
-	_, err = service.Encrypt(context.Background(), uid, data)
+	_, err = service.Encrypt(ctx, uid, data)
 	if err != nil {
 		t.Fatalf("failed when execute encrypt, error: %v", err)
 	}
@@ -118,7 +127,7 @@ func TestTimeouts(t *testing.T) {
 		t.Run(tt.desc, func(t *testing.T) {
 			t.Parallel()
 			var (
-				service         Service
+				service         kmsservice.Service
 				err             error
 				data            = []byte("test data")
 				uid             = string(uuid.NewUUID())
@@ -131,12 +140,14 @@ func TestTimeouts(t *testing.T) {
 			testCompletedWG.Add(1)
 			defer testCompletedWG.Done()
 
+			ctx := testContext(t)
+
 			kubeAPIServerWG.Add(1)
 			go func() {
 				// Simulating late start of kube-apiserver - plugin is up before kube-apiserver, if requested by the testcase.
 				time.Sleep(tt.kubeAPIServerDelay)
 
-				service, err = NewGRPCService(socketName.endpoint, tt.callTimeout)
+				service, err = NewGRPCService(ctx, socketName.endpoint, testProviderName, tt.callTimeout)
 				if err != nil {
 					t.Fatalf("failed to create envelope service, error: %v", err)
 				}
@@ -165,7 +176,7 @@ func TestTimeouts(t *testing.T) {
 			}()
 
 			kubeAPIServerWG.Wait()
-			_, err = service.Encrypt(context.Background(), uid, data)
+			_, err = service.Encrypt(ctx, uid, data)
 
 			if err == nil && tt.wantErr != "" {
 				t.Fatalf("got nil, want %s", tt.wantErr)
@@ -203,14 +214,15 @@ func TestIntermittentConnectionLoss(t *testing.T) {
 		t.Fatalf("Failed to start kms-plugin, err: %v", err)
 	}
 
+	ctx := testContext(t)
+
 	//  connect to kms plugin
-	service, err := NewGRPCService(endpoint.endpoint, timeout)
+	service, err := NewGRPCService(ctx, endpoint.endpoint, testProviderName, timeout)
 	if err != nil {
 		t.Fatalf("failed to create envelope service, error: %v", err)
 	}
 	defer destroyService(service)
 
-	ctx := context.Background()
 	_, err = service.Encrypt(ctx, uid, data)
 	if err != nil {
 		t.Fatalf("failed when execute encrypt, error: %v", err)
@@ -269,14 +281,15 @@ func TestGRPCService(t *testing.T) {
 	}
 	defer f.CleanUp()
 
+	ctx := testContext(t)
+
 	// Create the gRPC client service.
-	service, err := NewGRPCService(endpoint.endpoint, 1*time.Second)
+	service, err := NewGRPCService(ctx, endpoint.endpoint, testProviderName, 1*time.Second)
 	if err != nil {
 		t.Fatalf("failed to create envelope service, error: %v", err)
 	}
 	defer destroyService(service)
 
-	ctx := context.Background()
 	// Call service to encrypt data.
 	data := []byte("test data")
 	uid := string(uuid.NewUUID())
@@ -287,7 +300,7 @@ func TestGRPCService(t *testing.T) {
 
 	keyID := "1"
 	// Call service to decrypt data.
-	result, err := service.Decrypt(ctx, uid, &DecryptRequest{Ciphertext: resp.Ciphertext, KeyID: keyID})
+	result, err := service.Decrypt(ctx, uid, &kmsservice.DecryptRequest{Ciphertext: resp.Ciphertext, KeyID: keyID})
 	if err != nil {
 		t.Fatalf("failed when execute decrypt, error: %v", err)
 	}
@@ -311,14 +324,15 @@ func TestGRPCServiceConcurrentAccess(t *testing.T) {
 	}
 	defer f.CleanUp()
 
+	ctx := testContext(t)
+
 	// Create the gRPC client service.
-	service, err := NewGRPCService(endpoint.endpoint, 15*time.Second)
+	service, err := NewGRPCService(ctx, endpoint.endpoint, testProviderName, 15*time.Second)
 	if err != nil {
 		t.Fatalf("failed to create envelope service, error: %v", err)
 	}
 	defer destroyService(service)
 
-	ctx := context.Background()
 	var wg sync.WaitGroup
 	n := 100
 	wg.Add(n)
@@ -335,7 +349,7 @@ func TestGRPCServiceConcurrentAccess(t *testing.T) {
 
 			keyID := "1"
 			// Call service to decrypt data.
-			result, err := service.Decrypt(ctx, uid, &DecryptRequest{Ciphertext: resp.Ciphertext, KeyID: keyID})
+			result, err := service.Decrypt(ctx, uid, &kmsservice.DecryptRequest{Ciphertext: resp.Ciphertext, KeyID: keyID})
 			if err != nil {
 				t.Errorf("failed when execute decrypt, error: %v", err)
 			}
@@ -349,7 +363,7 @@ func TestGRPCServiceConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-func destroyService(service Service) {
+func destroyService(service kmsservice.Service) {
 	if service != nil {
 		s := service.(*gRPCService)
 		s.connection.Close()
@@ -369,6 +383,8 @@ func TestInvalidConfiguration(t *testing.T) {
 	}
 	defer f.CleanUp()
 
+	ctx := testContext(t)
+
 	invalidConfigs := []struct {
 		name     string
 		endpoint string
@@ -379,10 +395,109 @@ func TestInvalidConfiguration(t *testing.T) {
 
 	for _, testCase := range invalidConfigs {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, err := NewGRPCService(testCase.endpoint, 1*time.Second)
+			_, err := NewGRPCService(ctx, testCase.endpoint, testProviderName, 1*time.Second)
 			if err == nil {
 				t.Fatalf("should fail to create envelope service for %s.", testCase.name)
 			}
 		})
 	}
+}
+
+func TestKMSOperationsMetric(t *testing.T) {
+	endpoint := newEndpoint()
+	f, err := mock.NewBase64Plugin(endpoint.path)
+	if err != nil {
+		t.Fatalf("failed to start test KMS provider server, error: %v", err)
+	}
+	if err := f.Start(); err != nil {
+		t.Fatalf("Failed to start kms-plugin, err: %v", err)
+	}
+
+	ctx := testContext(t)
+
+	service, err := NewGRPCService(ctx, endpoint.endpoint, testProviderName, 15*time.Second)
+	if err != nil {
+		t.Fatalf("failed to create envelope service, error: %v", err)
+	}
+	defer destroyService(service)
+	metrics.RegisterMetrics()
+
+	testCases := []struct {
+		name        string
+		operation   func()
+		labelValues []string
+		wantCount   uint64
+	}{
+		{
+			name: "encrypt",
+			operation: func() {
+				if _, err = service.Encrypt(ctx, "1", []byte("test data")); err != nil {
+					t.Fatalf("failed when execute encrypt, error: %v", err)
+				}
+			},
+			labelValues: []string{testProviderName, "/v2alpha1.KeyManagementService/Encrypt", "OK"},
+			wantCount:   1,
+		},
+		{
+			name: "decrypt",
+			operation: func() {
+				if _, err = service.Decrypt(ctx, "1", &kmsservice.DecryptRequest{Ciphertext: []byte("testdata"), KeyID: "1"}); err != nil {
+					t.Fatalf("failed when execute decrypt, error: %v", err)
+				}
+			},
+			labelValues: []string{testProviderName, "/v2alpha1.KeyManagementService/Decrypt", "OK"},
+			wantCount:   1,
+		},
+		{
+			name: "status",
+			operation: func() {
+				if _, err = service.Status(ctx); err != nil {
+					t.Fatalf("failed when execute status, error: %v", err)
+				}
+			},
+			labelValues: []string{testProviderName, "/v2alpha1.KeyManagementService/Status", "OK"},
+			wantCount:   1,
+		},
+		{
+			name: "multiple status calls",
+			operation: func() {
+				for i := 0; i < 10; i++ {
+					if _, err = service.Status(ctx); err != nil {
+						t.Fatalf("failed when execute status, error: %v", err)
+					}
+				}
+			},
+			labelValues: []string{testProviderName, "/v2alpha1.KeyManagementService/Status", "OK"},
+			wantCount:   10,
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.operation()
+			defer metrics.KMSOperationsLatencyMetric.Reset()
+			sampleSum, err := testutil.GetHistogramMetricValue(metrics.KMSOperationsLatencyMetric.WithLabelValues(tt.labelValues...))
+			if err != nil {
+				t.Fatalf("failed to get metric value, error: %v", err)
+			}
+			// apiserver_envelope_encryption_kms_operations_latency_seconds_sum{grpc_status_code="OK",method_name="/v2alpha1.KeyManagementService/Encrypt",provider_name="providerName"} 0.000881432
+			if sampleSum == 0 {
+				t.Fatalf("expected metric value to be greater than 0, got %v", sampleSum)
+			}
+			count, err := testutil.GetHistogramMetricCount(metrics.KMSOperationsLatencyMetric.WithLabelValues(tt.labelValues...))
+			if err != nil {
+				t.Fatalf("failed to get metric count, error: %v", err)
+			}
+			// apiserver_envelope_encryption_kms_operations_latency_seconds_count{grpc_status_code="OK",method_name="/v2alpha1.KeyManagementService/Encrypt",provider_name="providerName"} 1
+			if count != tt.wantCount {
+				t.Fatalf("expected metric count to be %v, got %v", tt.wantCount, count)
+			}
+		})
+	}
+}
+
+func testContext(t *testing.T) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	return ctx
 }

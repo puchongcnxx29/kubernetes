@@ -178,7 +178,7 @@ func (e *E2EServices) startKubelet(featureGates map[string]bool) (*server, error
 
 	kc, err := baseKubeConfiguration(kubeletConfigFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load base kubelet configuration: %v", err)
+		return nil, fmt.Errorf("failed to load base kubelet configuration: %w", err)
 	}
 
 	// Apply overrides to allow access to the Kubelet API from the test suite.
@@ -198,6 +198,7 @@ func (e *E2EServices) startKubelet(featureGates map[string]bool) (*server, error
 
 	var killCommand, restartCommand *exec.Cmd
 	var isSystemd bool
+	var unitName string
 	// Apply default kubelet flags.
 	cmdArgs := []string{}
 	if systemdRun, err := exec.LookPath("systemd-run"); err == nil {
@@ -226,7 +227,7 @@ func (e *E2EServices) startKubelet(featureGates map[string]bool) (*server, error
 		cwd, _ := os.Getwd()
 		// Use the timestamp from the current directory to name the systemd unit.
 		unitTimestamp := remote.GetTimestampFromWorkspaceDir(cwd)
-		unitName := fmt.Sprintf("kubelet-%s.service", unitTimestamp)
+		unitName = fmt.Sprintf("kubelet-%s.service", unitTimestamp)
 		cmdArgs = append(cmdArgs,
 			systemdRun,
 			"-p", "Delegate=true",
@@ -252,7 +253,7 @@ func (e *E2EServices) startKubelet(featureGates map[string]bool) (*server, error
 	cmdArgs = append(cmdArgs,
 		"--kubeconfig", kubeconfigPath,
 		"--root-dir", KubeletRootDirectory,
-		"--v", LogVerbosityLevel, "--logtostderr",
+		"--v", LogVerbosityLevel,
 	)
 
 	// Apply test framework feature gates by default. This could also be overridden
@@ -299,7 +300,8 @@ func (e *E2EServices) startKubelet(featureGates map[string]bool) (*server, error
 		[]string{kubeletHealthCheckURL},
 		"kubelet.log",
 		e.monitorParent,
-		restartOnExit)
+		restartOnExit,
+		unitName)
 	return server, server.start()
 }
 
@@ -325,11 +327,11 @@ func writeKubeletConfigFile(internal *kubeletconfig.KubeletConfiguration, path s
 func createPodDirectory() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", fmt.Errorf("failed to get current working directory: %v", err)
+		return "", fmt.Errorf("failed to get current working directory: %w", err)
 	}
 	path, err := os.MkdirTemp(cwd, "static-pods")
 	if err != nil {
-		return "", fmt.Errorf("failed to create static pod directory: %v", err)
+		return "", fmt.Errorf("failed to create static pod directory: %w", err)
 	}
 	return path, nil
 }
@@ -373,7 +375,7 @@ func createRootDirectory(path string) error {
 func kubeconfigCWDPath() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", fmt.Errorf("failed to get current working directory: %v", err)
+		return "", fmt.Errorf("failed to get current working directory: %w", err)
 	}
 	return filepath.Join(cwd, "kubeconfig"), nil
 }
@@ -381,7 +383,7 @@ func kubeconfigCWDPath() (string, error) {
 func kubeletConfigCWDPath() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", fmt.Errorf("failed to get current working directory: %v", err)
+		return "", fmt.Errorf("failed to get current working directory: %w", err)
 	}
 	// DO NOT name this file "kubelet" - you will overwrite the kubelet binary and be very confused :)
 	return filepath.Join(cwd, "kubelet-config"), nil

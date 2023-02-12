@@ -19,6 +19,7 @@ package statefulset
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -198,9 +199,8 @@ func createHeadlessService(t *testing.T, clientSet clientset.Interface, headless
 	}
 }
 
-func createSTSsPods(t *testing.T, clientSet clientset.Interface, stss []*appsv1.StatefulSet, pods []*v1.Pod) ([]*appsv1.StatefulSet, []*v1.Pod) {
+func createSTSs(t *testing.T, clientSet clientset.Interface, stss []*appsv1.StatefulSet) []*appsv1.StatefulSet {
 	var createdSTSs []*appsv1.StatefulSet
-	var createdPods []*v1.Pod
 	for _, sts := range stss {
 		createdSTS, err := clientSet.AppsV1().StatefulSets(sts.Namespace).Create(context.TODO(), sts, metav1.CreateOptions{})
 		if err != nil {
@@ -208,6 +208,11 @@ func createSTSsPods(t *testing.T, clientSet clientset.Interface, stss []*appsv1.
 		}
 		createdSTSs = append(createdSTSs, createdSTS)
 	}
+	return createdSTSs
+}
+
+func createPods(t *testing.T, clientSet clientset.Interface, pods []*v1.Pod) []*v1.Pod {
+	var createdPods []*v1.Pod
 	for _, pod := range pods {
 		createdPod, err := clientSet.CoreV1().Pods(pod.Namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
 		if err != nil {
@@ -216,7 +221,11 @@ func createSTSsPods(t *testing.T, clientSet clientset.Interface, stss []*appsv1.
 		createdPods = append(createdPods, createdPod)
 	}
 
-	return createdSTSs, createdPods
+	return createdPods
+}
+
+func createSTSsPods(t *testing.T, clientSet clientset.Interface, stss []*appsv1.StatefulSet, pods []*v1.Pod) ([]*appsv1.StatefulSet, []*v1.Pod) {
+	return createSTSs(t, clientSet, stss), createPods(t, clientSet, pods)
 }
 
 // Verify .Status.Replicas is equal to .Spec.Replicas
@@ -344,6 +353,7 @@ func scaleSTS(t *testing.T, c clientset.Interface, sts *appsv1.StatefulSet, repl
 var _ admission.ValidationInterface = &fakePodFailAdmission{}
 
 type fakePodFailAdmission struct {
+	lock             sync.Mutex
 	limitedPodNumber int
 	succeedPodsCount int
 }
@@ -356,6 +366,9 @@ func (f *fakePodFailAdmission) Validate(ctx context.Context, attr admission.Attr
 	if attr.GetKind().GroupKind() != api.Kind("Pod") {
 		return nil
 	}
+
+	f.lock.Lock()
+	defer f.lock.Unlock()
 
 	if f.succeedPodsCount >= f.limitedPodNumber {
 		return fmt.Errorf("fakePodFailAdmission error")

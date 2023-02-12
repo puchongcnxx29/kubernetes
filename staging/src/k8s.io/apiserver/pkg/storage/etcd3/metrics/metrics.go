@@ -57,8 +57,9 @@ var (
 	)
 	dbTotalSize = compbasemetrics.NewGaugeVec(
 		&compbasemetrics.GaugeOpts{
-			Name:           "etcd_db_total_size_in_bytes",
-			Help:           "Total size of the etcd database file physically allocated in bytes.",
+			Subsystem:      "apiserver",
+			Name:           "storage_db_total_size_in_bytes",
+			Help:           "Total size of the storage database file physically allocated in bytes.",
 			StabilityLevel: compbasemetrics.ALPHA,
 		},
 		[]string{"endpoint"},
@@ -112,6 +113,15 @@ var (
 		},
 		[]string{"resource"},
 	)
+	decodeErrorCounts = compbasemetrics.NewCounterVec(
+		&compbasemetrics.CounterOpts{
+			Namespace:      "apiserver",
+			Name:           "storage_decode_errors_total",
+			Help:           "Number of stored object decode errors split by object type",
+			StabilityLevel: compbasemetrics.ALPHA,
+		},
+		[]string{"resource"},
+	)
 )
 
 var registerMetrics sync.Once
@@ -129,6 +139,7 @@ func Register() {
 		legacyregistry.MustRegister(listStorageNumFetched)
 		legacyregistry.MustRegister(listStorageNumSelectorEvals)
 		legacyregistry.MustRegister(listStorageNumReturned)
+		legacyregistry.MustRegister(decodeErrorCounts)
 	})
 }
 
@@ -145,6 +156,11 @@ func RecordEtcdRequestLatency(verb, resource string, startTime time.Time) {
 // RecordEtcdBookmark updates the etcd_bookmark_counts metric.
 func RecordEtcdBookmark(resource string) {
 	etcdBookmarkCounts.WithLabelValues(resource).Inc()
+}
+
+// RecordDecodeError sets the storage_decode_errors metrics.
+func RecordDecodeError(resource string) {
+	decodeErrorCounts.WithLabelValues(resource).Inc()
 }
 
 // Reset resets the etcd_request_duration_seconds metric.

@@ -75,11 +75,13 @@ var (
 
 	debugExample = templates.Examples(i18n.T(`
 		# Create an interactive debugging session in pod mypod and immediately attach to it.
-		# (requires the EphemeralContainers feature to be enabled in the cluster)
 		kubectl debug mypod -it --image=busybox
 
-		# Create a debug container named debugger using a custom automated debugging image.
+		# Create an interactive debugging session for the pod in the file pod.yaml and immediately attach to it.
 		# (requires the EphemeralContainers feature to be enabled in the cluster)
+		kubectl debug -f pod.yaml -it --image=busybox
+
+		# Create a debug container named debugger using a custom automated debugging image.
 		kubectl debug --image=myproj/debug-tools -c debugger mypod
 
 		# Create a copy of mypod adding a debug container and attach to it
@@ -123,16 +125,18 @@ type DebugOptions struct {
 	TargetContainer string
 	TTY             bool
 	Profile         string
+	Applier         ProfileApplier
 
+	explicitNamespace     bool
 	attachChanged         bool
 	shareProcessedChanged bool
 
 	podClient corev1client.CoreV1Interface
 
 	genericclioptions.IOStreams
-	warningPrinter *printers.WarningPrinter
+	WarningPrinter *printers.WarningPrinter
 
-	applier ProfileApplier
+	resource.FilenameOptions
 }
 
 // NewDebugOptions returns a DebugOptions initialized with default values.
@@ -163,6 +167,7 @@ func NewCmdDebug(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.
 	}
 
 	addDebugFlags(cmd, o)
+	cmdutil.AddJsonFilenameFlag(cmd.Flags(), &o.FilenameOptions.Filenames, "identifying the resource to debug")
 	return cmd
 }
 
@@ -182,7 +187,7 @@ func addDebugFlags(cmd *cobra.Command, opt *DebugOptions) {
 	cmd.Flags().BoolVar(&opt.ShareProcesses, "share-processes", opt.ShareProcesses, i18n.T("When used with '--copy-to', enable process namespace sharing in the copy."))
 	cmd.Flags().StringVar(&opt.TargetContainer, "target", "", i18n.T("When using an ephemeral container, target processes in this container name."))
 	cmd.Flags().BoolVarP(&opt.TTY, "tty", "t", opt.TTY, i18n.T("Allocate a TTY for the debugging container."))
-	cmd.Flags().StringVar(&opt.Profile, "profile", ProfileLegacy, i18n.T("Debugging profile."))
+	cmd.Flags().StringVar(&opt.Profile, "profile", ProfileLegacy, i18n.T(`Debugging profile. Options are "legacy", "general", "baseline", or "restricted".`))
 }
 
 // Complete finishes run-time initialization of debug.DebugOptions.
@@ -215,7 +220,7 @@ func (o *DebugOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []st
 	}
 
 	// Namespace
-	o.Namespace, _, err = f.ToRawKubeConfigLoader().Namespace()
+	o.Namespace, o.explicitNamespace, err = f.ToRawKubeConfigLoader().Namespace()
 	if err != nil {
 		return err
 	}
@@ -224,11 +229,17 @@ func (o *DebugOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []st
 	o.attachChanged = cmd.Flags().Changed("attach")
 	o.shareProcessedChanged = cmd.Flags().Changed("share-processes")
 
-	// Warning printer
-	o.warningPrinter = printers.NewWarningPrinter(o.ErrOut, printers.WarningPrinterOptions{Color: term.AllowsColorOutput(o.ErrOut)})
-	o.applier, err = NewProfileApplier(o.Profile)
-	if err != nil {
-		return err
+	// Set default WarningPrinter
+	if o.WarningPrinter == nil {
+		o.WarningPrinter = printers.NewWarningPrinter(o.ErrOut, printers.WarningPrinterOptions{Color: term.AllowsColorOutput(o.ErrOut)})
+	}
+
+	if o.Applier == nil {
+		applier, err := NewProfileApplier(o.Profile)
+		if err != nil {
+			return err
+		}
+		o.Applier = applier
 	}
 
 	return nil
@@ -269,8 +280,8 @@ func (o *DebugOptions) Validate() error {
 	}
 
 	// Name
-	if len(o.TargetNames) == 0 {
-		return fmt.Errorf("NAME is required for debug")
+	if len(o.TargetNames) == 0 && len(o.FilenameOptions.Filenames) == 0 {
+		return fmt.Errorf("NAME or filename is required for debug")
 	}
 
 	// Pull Policy
@@ -294,9 +305,6 @@ func (o *DebugOptions) Validate() error {
 			return fmt.Errorf("--target is incompatible with --copy-to. Use --share-processes instead.")
 		}
 		if !o.Quiet {
-			// If the runtime doesn't support container namespace targeting this will fail silently, which has caused
-			// some confusion (ex: https://issues.k8s.io/98362), so print a warning. This can be removed when
-			// EphemeralContainers are generally available.
 			fmt.Fprintf(o.Out, "Targeting container %q. If you don't see processes from this container it may be because the container runtime doesn't support this feature.\n", o.TargetContainer)
 			// TODO(verb): Add a list of supported container runtimes to https://kubernetes.io/docs/concepts/workloads/pods/ephemeral-containers/ and then link here.
 		}
@@ -307,9 +315,9 @@ func (o *DebugOptions) Validate() error {
 		return fmt.Errorf("-i/--stdin is required for containers with -t/--tty=true")
 	}
 
-	// warningPrinter
-	if o.warningPrinter == nil {
-		return fmt.Errorf("warningPrinter can not be used without initialization")
+	// WarningPrinter
+	if o.WarningPrinter == nil {
+		return fmt.Errorf("WarningPrinter can not be used without initialization")
 	}
 
 	return nil
@@ -327,6 +335,7 @@ func (o *DebugOptions) Run(f cmdutil.Factory, cmd *cobra.Command) error {
 
 	r := f.NewBuilder().
 		WithScheme(scheme.Scheme, scheme.Scheme.PrioritizedVersionsAllGroups()...).
+		FilenameParam(o.explicitNamespace, &o.FilenameOptions).
 		NamespaceParam(o.Namespace).DefaultNamespace().ResourceNames("pods", o.TargetNames...).
 		Do()
 	if err := r.Err(); err != nil {
@@ -445,7 +454,7 @@ func (o *DebugOptions) debugByEphemeralContainer(ctx context.Context, pod *corev
 		// The apiserver will return a 404 when the EphemeralContainers feature is disabled because the `/ephemeralcontainers` subresource
 		// is missing. Unlike the 404 returned by a missing pod, the status details will be empty.
 		if serr, ok := err.(*errors.StatusError); ok && serr.Status().Reason == metav1.StatusReasonNotFound && serr.ErrStatus.Details.Name == "" {
-			return nil, "", fmt.Errorf("ephemeral containers are disabled for this cluster (error from server: %q).", err)
+			return nil, "", fmt.Errorf("ephemeral containers are disabled for this cluster (error from server: %q)", err)
 		}
 
 		// The Kind used for the /ephemeralcontainers subresource changed in 1.22. When presented with an unexpected
@@ -539,9 +548,11 @@ func (o *DebugOptions) generateDebugContainer(pod *corev1.Pod) (*corev1.Pod, *co
 
 	copied := pod.DeepCopy()
 	copied.Spec.EphemeralContainers = append(copied.Spec.EphemeralContainers, *ec)
-	if err := o.applier.Apply(copied, name, copied); err != nil {
+	if err := o.Applier.Apply(copied, name, copied); err != nil {
 		return nil, nil, err
 	}
+
+	ec = &copied.Spec.EphemeralContainers[len(copied.Spec.EphemeralContainers)-1]
 
 	return copied, ec, nil
 }
@@ -596,7 +607,7 @@ func (o *DebugOptions) generateNodeDebugPod(node *corev1.Node) (*corev1.Pod, err
 		p.Spec.Containers[0].Command = o.Args
 	}
 
-	if err := o.applier.Apply(p, cn, node); err != nil {
+	if err := o.Applier.Apply(p, cn, node); err != nil {
 		return nil, err
 	}
 
@@ -617,7 +628,7 @@ func (o *DebugOptions) generatePodCopyWithDebugContainer(pod *corev1.Pod) (*core
 	copied.Spec.EphemeralContainers = nil
 	// change ShareProcessNamespace configuration only when commanded explicitly
 	if o.shareProcessedChanged {
-		copied.Spec.ShareProcessNamespace = pointer.BoolPtr(o.ShareProcesses)
+		copied.Spec.ShareProcessNamespace = pointer.Bool(o.ShareProcesses)
 	}
 	if !o.SameNode {
 		copied.Spec.NodeName = ""
@@ -650,13 +661,11 @@ func (o *DebugOptions) generatePodCopyWithDebugContainer(pod *corev1.Pod) (*core
 		if len(name) == 0 {
 			name = o.computeDebugContainerName(copied)
 		}
-		c = &corev1.Container{
+		copied.Spec.Containers = append(copied.Spec.Containers, corev1.Container{
 			Name:                     name,
 			TerminationMessagePolicy: corev1.TerminationMessageReadFile,
-		}
-		defer func() {
-			copied.Spec.Containers = append(copied.Spec.Containers, *c)
-		}()
+		})
+		c = &copied.Spec.Containers[len(copied.Spec.Containers)-1]
 	}
 
 	if len(o.Args) > 0 {
@@ -679,7 +688,7 @@ func (o *DebugOptions) generatePodCopyWithDebugContainer(pod *corev1.Pod) (*core
 	c.Stdin = o.Interactive
 	c.TTY = o.TTY
 
-	err := o.applier.Apply(copied, c.Name, pod)
+	err := o.Applier.Apply(copied, c.Name, pod)
 	if err != nil {
 		return nil, "", err
 	}
@@ -691,18 +700,15 @@ func (o *DebugOptions) computeDebugContainerName(pod *corev1.Pod) string {
 	if len(o.Container) > 0 {
 		return o.Container
 	}
-	name := o.Container
-	if len(name) == 0 {
-		cn, containerByName := "", containerNameToRef(pod)
-		for len(cn) == 0 || (containerByName[cn] != nil) {
-			cn = fmt.Sprintf("debugger-%s", nameSuffixFunc(5))
-		}
-		if !o.Quiet {
-			fmt.Fprintf(o.Out, "Defaulting debug container name to %s.\n", cn)
-		}
-		name = cn
+
+	cn, containerByName := "", containerNameToRef(pod)
+	for len(cn) == 0 || (containerByName[cn] != nil) {
+		cn = fmt.Sprintf("debugger-%s", nameSuffixFunc(5))
 	}
-	return name
+	if !o.Quiet {
+		fmt.Fprintf(o.Out, "Defaulting debug container name to %s.\n", cn)
+	}
+	return cn
 }
 
 func containerNameToRef(pod *corev1.Pod) map[string]*corev1.Container {
@@ -764,7 +770,7 @@ func (o *DebugOptions) waitForContainer(ctx context.Context, ns, podName, contai
 				return true, nil
 			}
 			if !o.Quiet && s.State.Waiting != nil && s.State.Waiting.Message != "" {
-				o.warningPrinter.Print(fmt.Sprintf("container %s: %s", containerName, s.State.Waiting.Message))
+				o.WarningPrinter.Print(fmt.Sprintf("container %s: %s", containerName, s.State.Waiting.Message))
 			}
 			return false, nil
 		})

@@ -79,7 +79,7 @@ func (w *wrappedLifecycleSignal) Signal() {
 	}
 }
 
-func wrapLifecycleSignalsWithRecorer(t *testing.T, signals *lifecycleSignals, before func(lifecycleSignal)) {
+func wrapLifecycleSignalsWithRecorder(t *testing.T, signals *lifecycleSignals, before func(lifecycleSignal)) {
 	// it's important to record the signal being fired on a 'before' callback
 	// to avoid flakes, since on the server the signaling of events are
 	// an asynchronous process.
@@ -124,7 +124,7 @@ func newSignalInterceptingTestStep() *signalInterceptingTestStep {
 //	 described in the following diagram
 //	   - every vertical line is an independent timeline
 //	   - the leftmost vertical line represents the go routine that
-//	     is executing GenericAPIServer.Run methos
+//	     is executing GenericAPIServer.Run method
 //	   - (signal name) indicates that the given lifecycle signal has been fired
 //
 //	                                 stopCh
@@ -144,7 +144,7 @@ func newSignalInterceptingTestStep() *signalInterceptingTestStep {
 //	             |                                            |
 //	             |                       |-------------------------------------------------|
 //	             |                       |                                                 |
-//	             |             close(stopHttpServerCh)                         HandlerChainWaitGroup.Wait()
+//	             |             close(stopHttpServerCh)                         NonLongRunningRequestWaitGroup.Wait()
 //	             |                       |                                                 |
 //	             |            server.Shutdown(timeout=60s)                                 |
 //	             |                       |                                                 |
@@ -185,7 +185,7 @@ func TestGracefulTerminationWithKeepListeningDuringGracefulTerminationDisabled(t
 
 	signals := &s.lifecycleSignals
 	recorder := &signalRecorder{}
-	wrapLifecycleSignalsWithRecorer(t, signals, recorder.before)
+	wrapLifecycleSignalsWithRecorder(t, signals, recorder.before)
 
 	// before the AfterShutdownDelayDuration signal is fired, we want
 	// the test to execute a verification step.
@@ -357,7 +357,7 @@ func TestGracefulTerminationWithKeepListeningDuringGracefulTerminationDisabled(t
 //     |                                            |
 //     |                               (NotAcceptingNewRequest)
 //     |                                            |
-//     |                              HandlerChainWaitGroup.Wait()
+//     |                              NonLongRunningRequestWaitGroup.Wait()
 //     |                                            |
 //     |                                (InFlightRequestsDrained)
 //     |                                            |
@@ -393,7 +393,7 @@ func TestGracefulTerminationWithKeepListeningDuringGracefulTerminationEnabled(t 
 
 	signals := &s.lifecycleSignals
 	recorder := &signalRecorder{}
-	wrapLifecycleSignalsWithRecorer(t, signals, recorder.before)
+	wrapLifecycleSignalsWithRecorder(t, signals, recorder.before)
 
 	// before the AfterShutdownDelayDuration signal is fired, we want
 	// the test to execute a verification step.
@@ -780,10 +780,9 @@ func (a *fakeAudit) requestAudited(auditID string) bool {
 	return exists
 }
 
-func (a *fakeAudit) EvaluatePolicyRule(attrs authorizer.Attributes) audit.RequestAuditConfigWithLevel {
-	return audit.RequestAuditConfigWithLevel{
-		Level:              auditinternal.LevelMetadata,
-		RequestAuditConfig: audit.RequestAuditConfig{},
+func (a *fakeAudit) EvaluatePolicyRule(attrs authorizer.Attributes) audit.RequestAuditConfig {
+	return audit.RequestAuditConfig{
+		Level: auditinternal.LevelMetadata,
 	}
 }
 
@@ -858,7 +857,7 @@ func waitForAPIServerStarted(t *testing.T, doer doer) {
 	client := newClient(true)
 	i := 1
 	err := wait.PollImmediate(100*time.Millisecond, 5*time.Second, func() (done bool, err error) {
-		result := doer.Do(client, func(httptrace.GotConnInfo) {}, fmt.Sprintf("/echo?message=attempt-%d", i), 100*time.Millisecond)
+		result := doer.Do(client, func(httptrace.GotConnInfo) {}, fmt.Sprintf("/echo?message=attempt-%d", i), time.Second)
 		i++
 
 		if result.err != nil {

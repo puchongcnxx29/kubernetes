@@ -45,9 +45,7 @@ import (
 	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
 	"k8s.io/apiserver/pkg/endpoints/metrics"
 	"k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/apiserver/pkg/features"
 	"k8s.io/apiserver/pkg/registry/rest"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/apiserver/pkg/warning"
 )
 
@@ -237,7 +235,7 @@ type responder struct {
 }
 
 func (r *responder) Object(statusCode int, obj runtime.Object) {
-	responsewriters.WriteObjectNegotiated(r.scope.Serializer, r.scope, r.scope.Kind.GroupVersion(), r.w, r.req, statusCode, obj)
+	responsewriters.WriteObjectNegotiated(r.scope.Serializer, r.scope, r.scope.Kind.GroupVersion(), r.w, r.req, statusCode, obj, false)
 }
 
 func (r *responder) Error(err error) {
@@ -406,13 +404,10 @@ func isDryRun(url *url.URL) bool {
 
 // fieldValidation checks that the field validation feature is enabled
 // and returns a valid directive of either
-// - Ignore (default when feature is disabled)
-// - Warn (default when feature is enabled)
+// - Ignore
+// - Warn (default)
 // - Strict
 func fieldValidation(directive string) string {
-	if !utilfeature.DefaultFeatureGate.Enabled(features.ServerSideFieldValidation) {
-		return metav1.FieldValidationIgnore
-	}
 	if directive == "" {
 		return metav1.FieldValidationWarn
 	}

@@ -70,7 +70,6 @@ readonly KUBE_SUPPORTED_TEST_PLATFORMS=(
 )
 
 # The set of server targets that we are only building for Linux
-# If you update this list, please also update build/BUILD.
 kube::golang::server_targets() {
   local targets=(
     cmd/kube-proxy
@@ -123,7 +122,6 @@ IFS=" " read -ra KUBE_CONFORMANCE_IMAGE_TARGETS <<< "$(kube::golang::conformance
 readonly KUBE_CONFORMANCE_IMAGE_TARGETS
 
 # The set of server targets that we are only building for Kubernetes nodes
-# If you update this list, please also update build/BUILD.
 kube::golang::node_targets() {
   local targets=(
     cmd/kube-proxy
@@ -256,7 +254,6 @@ kube::golang::setup_platforms() {
 kube::golang::setup_platforms
 
 # The set of client targets that we are building for all platforms
-# If you update this list, please also update build/BUILD.
 readonly KUBE_CLIENT_TARGETS=(
   cmd/kubectl
   cmd/kubectl-convert
@@ -265,7 +262,6 @@ readonly KUBE_CLIENT_BINARIES=("${KUBE_CLIENT_TARGETS[@]##*/}")
 readonly KUBE_CLIENT_BINARIES_WIN=("${KUBE_CLIENT_BINARIES[@]/%/.exe}")
 
 # The set of test targets that we are building for all platforms
-# If you update this list, please also update build/BUILD.
 kube::golang::test_targets() {
   local targets=(
     cmd/gendocs
@@ -273,7 +269,6 @@ kube::golang::test_targets() {
     cmd/genman
     cmd/genyaml
     cmd/genswaggertypedocs
-    cmd/linkcheck
     ginkgo
     test/e2e/e2e.test
     test/conformance/image/go-runner
@@ -284,7 +279,6 @@ IFS=" " read -ra KUBE_TEST_TARGETS <<< "$(kube::golang::test_targets)"
 readonly KUBE_TEST_TARGETS
 readonly KUBE_TEST_BINARIES=("${KUBE_TEST_TARGETS[@]##*/}")
 readonly KUBE_TEST_BINARIES_WIN=("${KUBE_TEST_BINARIES[@]/%/.exe}")
-# If you update this list, please also update build/BUILD.
 readonly KUBE_TEST_PORTABLE=(
   test/e2e/testing-manifests
   test/kubemark
@@ -297,7 +291,6 @@ readonly KUBE_TEST_PORTABLE=(
 # Test targets which run on the Kubernetes clusters directly, so we only
 # need to target server platforms.
 # These binaries will be distributed in the kubernetes-test tarball.
-# If you update this list, please also update build/BUILD.
 kube::golang::server_test_targets() {
   local targets=(
     cmd/kubemark
@@ -339,6 +332,7 @@ readonly KUBE_STATIC_LIBRARIES=(
   kube-log-runner
   kubeadm
   kubectl
+  kubectl-convert
   kubemark
 )
 
@@ -470,7 +464,21 @@ kube::golang::create_gopath_tree() {
 }
 
 # Ensure the go tool exists and is a viable version.
+# Inputs:
+#   env-var GO_VERSION is the desired go version to use, downloading it if needed (defaults to content of .go-version)
+#   env-var FORCE_HOST_GO set to a non-empty value uses the go version in the $PATH and skips ensuring $GO_VERSION is used
 kube::golang::verify_go_version() {
+  # default GO_VERSION to content of .go-version
+  GO_VERSION="${GO_VERSION:-"$(cat "${KUBE_ROOT}/.go-version")"}"
+  # only setup go if we haven't set FORCE_HOST_GO, or `go version` doesn't match GO_VERSION
+  if ! ([ -n "${FORCE_HOST_GO:-}" ] || \
+      (command -v go >/dev/null && [ "$(go version | cut -d' ' -f3)" = "go${GO_VERSION}" ])); then
+      export GIMME_ENV_PREFIX=${GIMME_ENV_PREFIX:-"${KUBE_OUTPUT}/.gimme/envs"}
+      export GIMME_VERSION_PREFIX=${GIMME_VERSION_PREFIX:-"${KUBE_OUTPUT}/.gimme/versions"}
+      # eval because the output of this is shell to set PATH etc.
+      eval "$("${KUBE_ROOT}/third_party/gimme/gimme" "${GO_VERSION}")"
+  fi
+
   if [[ -z "$(command -v go)" ]]; then
     kube::log::usage_from_stdin <<EOF
 Can't find 'go' in PATH, please fix and retry.
@@ -482,6 +490,7 @@ EOF
   local go_version
   IFS=" " read -ra go_version <<< "$(GOFLAGS='' go version)"
   local minimum_go_version
+  # TODO(cpanato): Need to switch this to 1.20 once we update images to newer go version
   minimum_go_version=go1.19
   if [[ "${minimum_go_version}" != $(echo -e "${minimum_go_version}\n${go_version[2]}" | sort -s -t. -k 1,1 -k 2,2n -k 3,3n | head -n1) && "${go_version[2]}" != "devel" ]]; then
     kube::log::usage_from_stdin <<EOF
@@ -527,7 +536,10 @@ kube::golang::setup_env() {
   kube::golang::create_gopath_tree
   export GOPATH="${KUBE_GOPATH}"
 
-  export GOCACHE="${KUBE_GOPATH}/cache"
+  # If these are not set, set them now.  This ensures that any subsequent
+  # scripts we run (which may call this function again) use the same values.
+  export GOCACHE="${GOCACHE:-"${KUBE_GOPATH}/cache/build"}"
+  export GOMODCACHE="${GOMODCACHE:-"${KUBE_GOPATH}/cache/mod"}"
 
   # Make sure our own Go binaries are in PATH.
   export PATH="${KUBE_GOPATH}/bin:${PATH}"
@@ -762,15 +774,26 @@ kube::golang::build_binaries_for_platform() {
     kube::golang::build_some_binaries "${nonstatics[@]}"
   fi
 
+  # Workaround for https://github.com/kubernetes/kubernetes/issues/115675
+  local testgogcflags="${gogcflags}"
+  local testgoexperiment="${GOEXPERIMENT:-}"
+  if [[ "$(go version)" == *"go1.20"* && "${platform}" == "linux/arm" ]]; then
+    # work around https://github.com/golang/go/issues/58339 until fixed in go1.20.x
+    testgogcflags="${testgogcflags} -d=inlstaticinit=0"
+    # work around https://github.com/golang/go/issues/58425
+    testgoexperiment="nounified,${testgoexperiment}"
+    kube::log::info "Building test binaries with GOEXPERIMENT=${testgoexperiment} GCFLAGS=${testgogcflags} ASMFLAGS=${goasmflags} LDFLAGS=${goldflags}"
+  fi
+
   for test in "${tests[@]:+${tests[@]}}"; do
     local outfile testpkg
     outfile=$(kube::golang::outfile_for_binary "${test}" "${platform}")
     testpkg=$(dirname "${test}")
 
     mkdir -p "$(dirname "${outfile}")"
-    go test -c \
+    GOEXPERIMENT="${testgoexperiment}" go test -c \
       ${goflags:+"${goflags[@]}"} \
-      -gcflags="${gogcflags}" \
+      -gcflags="${testgogcflags}" \
       -asmflags="${goasmflags}" \
       -ldflags="${goldflags}" \
       -tags="${gotags:-}" \

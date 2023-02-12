@@ -18,9 +18,9 @@ package dns
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -77,8 +77,11 @@ func TestParseResolvConf(t *testing.T) {
 		{"nameserver \t 1.2.3.4", []string{"1.2.3.4"}, []string{}, []string{}, false},
 		{"nameserver 1.2.3.4\nnameserver 5.6.7.8", []string{"1.2.3.4", "5.6.7.8"}, []string{}, []string{}, false},
 		{"nameserver 1.2.3.4 #comment", []string{"1.2.3.4"}, []string{}, []string{}, false},
-		{"search ", []string{}, []string{}, []string{}, false}, // search empty
-		{"search .", []string{}, []string{"."}, []string{}, false},
+		{"search ", []string{}, []string{}, []string{}, false},  // search empty
+		{"search .", []string{}, []string{}, []string{}, false}, // ignore lone dot
+		{"search . foo", []string{}, []string{"foo"}, []string{}, false},
+		{"search foo .", []string{}, []string{"foo"}, []string{}, false},
+		{"search foo .  bar", []string{}, []string{"foo", "bar"}, []string{}, false},
 		{"search foo", []string{}, []string{"foo"}, []string{}, false},
 		{"search foo bar", []string{}, []string{"foo", "bar"}, []string{}, false},
 		{"search foo. bar", []string{}, []string{"foo", "bar"}, []string{}, false},
@@ -89,7 +92,11 @@ func TestParseResolvConf(t *testing.T) {
 		{"#comment\nnameserver 1.2.3.4\n#comment\nsearch foo\ncomment", []string{"1.2.3.4"}, []string{"foo"}, []string{}, false},
 		{"options ", []string{}, []string{}, []string{}, false},
 		{"options ndots:5 attempts:2", []string{}, []string{}, []string{"ndots:5", "attempts:2"}, false},
+		{"options ndots:1 ndots:5 attempts:2", []string{}, []string{}, []string{"ndots:5", "attempts:2"}, false},
+		{"options ndots:1 edns0 attempts:2 single-request-reopen", []string{}, []string{}, []string{"edns0", "attempts:2", "single-request-reopen", "ndots:1"}, false},
 		{"options ndots:1\noptions ndots:5 attempts:3", []string{}, []string{}, []string{"ndots:5", "attempts:3"}, false},
+		{"options ndots:1 timeout:3 timeout:1 attempts:3\noptions ndots:5", []string{}, []string{}, []string{"ndots:5", "timeout:1", "attempts:3"}, false},
+		{"options ndots:1 attempts:3\noptions ndots:1 attempts:3 ndots:5", []string{}, []string{}, []string{"ndots:5", "attempts:3"}, false},
 		{"nameserver 1.2.3.4\nsearch foo\nnameserver 5.6.7.8\nsearch bar\noptions ndots:5 attempts:4", []string{"1.2.3.4", "5.6.7.8"}, []string{"bar"}, []string{"ndots:5", "attempts:4"}, false},
 	}
 	for i, tc := range testCases {
@@ -98,7 +105,7 @@ func TestParseResolvConf(t *testing.T) {
 			require.NoError(t, err)
 			assert.EqualValues(t, tc.nameservers, ns, "test case [%d]: name servers", i)
 			assert.EqualValues(t, tc.searches, srch, "test case [%d] searches", i)
-			assert.EqualValues(t, tc.options, opts, "test case [%d] options", i)
+			assert.EqualValues(t, sets.NewString(tc.options...), sets.NewString(opts...), "test case [%d] options", i)
 		} else {
 			require.Error(t, err, "tc.searches %v", tc.searches)
 		}
@@ -450,19 +457,26 @@ func TestGetPodDNS(t *testing.T) {
 	testCases := []struct {
 		desc              string
 		expandedDNSConfig bool
+		skipOnWindows     bool
 	}{
 		{
 			desc:              "Not ExpandedDNSConfig",
 			expandedDNSConfig: false,
+			skipOnWindows:     true,
 		},
 		{
 			desc:              "ExpandedDNSConfig",
 			expandedDNSConfig: true,
+			skipOnWindows:     true,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
+			// Skip tests that fail on Windows, as discussed during the SIG Testing meeting from January 10, 2023
+			if tc.skipOnWindows && goruntime.GOOS == "windows" {
+				t.Skip("Skipping test that fails on Windows")
+			}
 			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ExpandedDNSConfig, tc.expandedDNSConfig)()
 			testGetPodDNS(t)
 		})
@@ -596,7 +610,7 @@ func TestGetPodDNSCustom(t *testing.T) {
 	}
 
 	resolvConfContent := []byte(fmt.Sprintf("nameserver %s\nsearch %s\n", testHostNameserver, testHostDomain))
-	tmpfile, err := ioutil.TempFile("", "tmpResolvConf")
+	tmpfile, err := os.CreateTemp("", "tmpResolvConf")
 	if err != nil {
 		t.Fatal(err)
 	}

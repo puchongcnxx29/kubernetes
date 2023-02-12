@@ -17,6 +17,7 @@ limitations under the License.
 package aws
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -67,7 +68,7 @@ func (p *Provider) GroupSize(group string) (int, error) {
 	client := autoscaling.New(awsSession)
 	instanceGroup, err := awscloud.DescribeInstanceGroup(client, group)
 	if err != nil {
-		return -1, fmt.Errorf("error describing instance group: %v", err)
+		return -1, fmt.Errorf("error describing instance group: %w", err)
 	}
 	if instanceGroup == nil {
 		return -1, fmt.Errorf("instance group not found: %s", group)
@@ -156,14 +157,14 @@ func (p *Provider) DeletePD(pdName string) error {
 		if awsError, ok := err.(awserr.Error); ok && awsError.Code() == "InvalidVolume.NotFound" {
 			framework.Logf("volume deletion implicitly succeeded because volume %q does not exist.", pdName)
 		} else {
-			return fmt.Errorf("error deleting EBS volumes: %v", err)
+			return fmt.Errorf("error deleting EBS volumes: %w", err)
 		}
 	}
 	return nil
 }
 
 // CreatePVSource creates a persistent volume source
-func (p *Provider) CreatePVSource(zone, diskName string) (*v1.PersistentVolumeSource, error) {
+func (p *Provider) CreatePVSource(ctx context.Context, zone, diskName string) (*v1.PersistentVolumeSource, error) {
 	return &v1.PersistentVolumeSource{
 		AWSElasticBlockStore: &v1.AWSElasticBlockStoreVolumeSource{
 			VolumeID: diskName,
@@ -173,8 +174,8 @@ func (p *Provider) CreatePVSource(zone, diskName string) (*v1.PersistentVolumeSo
 }
 
 // DeletePVSource deletes a persistent volume source
-func (p *Provider) DeletePVSource(pvSource *v1.PersistentVolumeSource) error {
-	return e2epv.DeletePDWithRetry(pvSource.AWSElasticBlockStore.VolumeID)
+func (p *Provider) DeletePVSource(ctx context.Context, pvSource *v1.PersistentVolumeSource) error {
+	return e2epv.DeletePDWithRetry(ctx, pvSource.AWSElasticBlockStore.VolumeID)
 }
 
 func newAWSClient(zone string) *ec2.EC2 {

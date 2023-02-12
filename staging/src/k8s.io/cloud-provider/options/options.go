@@ -57,6 +57,7 @@ type CloudControllerManagerOptions struct {
 	Generic           *cmoptions.GenericControllerManagerConfigurationOptions
 	KubeCloudShared   *KubeCloudSharedOptions
 	ServiceController *ServiceControllerOptions
+	NodeController    *NodeControllerOptions
 
 	SecureServing  *apiserveroptions.SecureServingOptionsWithLoopback
 	Authentication *apiserveroptions.DelegatingAuthenticationOptions
@@ -79,6 +80,9 @@ func NewCloudControllerManagerOptions() (*CloudControllerManagerOptions, error) 
 	s := CloudControllerManagerOptions{
 		Generic:         cmoptions.NewGenericControllerManagerConfigurationOptions(&componentConfig.Generic),
 		KubeCloudShared: NewKubeCloudSharedOptions(&componentConfig.KubeCloudShared),
+		NodeController: &NodeControllerOptions{
+			NodeControllerConfiguration: &componentConfig.NodeController,
+		},
 		ServiceController: &ServiceControllerOptions{
 			ServiceControllerConfiguration: &componentConfig.ServiceController,
 		},
@@ -111,14 +115,16 @@ func NewDefaultComponentConfig() (*ccmconfig.CloudControllerManagerConfiguration
 	if err := ccmconfigscheme.Scheme.Convert(versioned, internal, nil); err != nil {
 		return nil, err
 	}
+
 	return internal, nil
 }
 
-// Flags returns flags for a specific APIServer by section name
+// Flags returns flags for a specific CloudController by section name
 func (o *CloudControllerManagerOptions) Flags(allControllers, disabledByDefaultControllers []string) cliflag.NamedFlagSets {
 	fss := cliflag.NamedFlagSets{}
 	o.Generic.AddFlags(&fss, allControllers, disabledByDefaultControllers)
 	o.KubeCloudShared.AddFlags(fss.FlagSet("generic"))
+	o.NodeController.AddFlags(fss.FlagSet("node controller"))
 	o.ServiceController.AddFlags(fss.FlagSet("service controller"))
 
 	o.SecureServing.AddFlags(fss.FlagSet("secure serving"))
@@ -138,6 +144,20 @@ func (o *CloudControllerManagerOptions) Flags(allControllers, disabledByDefaultC
 // ApplyTo fills up cloud controller manager config with options.
 func (o *CloudControllerManagerOptions) ApplyTo(c *config.Config, userAgent string) error {
 	var err error
+
+	// Build kubeconfig first to so that if it fails, it doesn't cause leaking
+	// goroutines (started from initializing secure serving - which underneath
+	// creates a queue which in its constructor starts a goroutine).
+	c.Kubeconfig, err = clientcmd.BuildConfigFromFlags(o.Master, o.Kubeconfig)
+	if err != nil {
+		return err
+	}
+	c.Kubeconfig.DisableCompression = true
+	c.Kubeconfig.ContentConfig.AcceptContentTypes = o.Generic.ClientConnection.AcceptContentTypes
+	c.Kubeconfig.ContentConfig.ContentType = o.Generic.ClientConnection.ContentType
+	c.Kubeconfig.QPS = o.Generic.ClientConnection.QPS
+	c.Kubeconfig.Burst = int(o.Generic.ClientConnection.Burst)
+
 	if err = o.Generic.ApplyTo(&c.ComponentConfig.Generic); err != nil {
 		return err
 	}
@@ -158,16 +178,6 @@ func (o *CloudControllerManagerOptions) ApplyTo(c *config.Config, userAgent stri
 			return err
 		}
 	}
-
-	c.Kubeconfig, err = clientcmd.BuildConfigFromFlags(o.Master, o.Kubeconfig)
-	if err != nil {
-		return err
-	}
-	c.Kubeconfig.DisableCompression = true
-	c.Kubeconfig.ContentConfig.AcceptContentTypes = o.Generic.ClientConnection.AcceptContentTypes
-	c.Kubeconfig.ContentConfig.ContentType = o.Generic.ClientConnection.ContentType
-	c.Kubeconfig.QPS = o.Generic.ClientConnection.QPS
-	c.Kubeconfig.Burst = int(o.Generic.ClientConnection.Burst)
 
 	c.Client, err = clientset.NewForConfig(restclient.AddUserAgent(c.Kubeconfig, userAgent))
 	if err != nil {
@@ -194,6 +204,7 @@ func (o *CloudControllerManagerOptions) ApplyTo(c *config.Config, userAgent stri
 	// sync back to component config
 	// TODO: find more elegant way than syncing back the values.
 	c.ComponentConfig.NodeStatusUpdateFrequency = o.NodeStatusUpdateFrequency
+	c.ComponentConfig.NodeController.ConcurrentNodeSyncs = o.NodeController.ConcurrentNodeSyncs
 
 	return nil
 }

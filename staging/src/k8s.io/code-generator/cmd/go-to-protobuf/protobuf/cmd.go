@@ -30,7 +30,6 @@ import (
 
 	flag "github.com/spf13/pflag"
 
-	"k8s.io/code-generator/pkg/util"
 	"k8s.io/gengo/args"
 	"k8s.io/gengo/generator"
 	"k8s.io/gengo/namer"
@@ -56,8 +55,7 @@ type Generator struct {
 func New() *Generator {
 	sourceTree := args.DefaultSourceTree()
 	common := args.GeneratorArgs{
-		OutputBase:       sourceTree,
-		GoHeaderFilePath: util.BoilerplatePath(),
+		OutputBase: sourceTree,
 	}
 	defaultProtoImport := filepath.Join(sourceTree, "k8s.io", "kubernetes", "vendor", "github.com", "gogo", "protobuf", "protobuf")
 	cwd, err := os.Getwd()
@@ -275,11 +273,9 @@ func Run(g *Generator) {
 		// generate the gogoprotobuf protoc
 		cmd := exec.Command("protoc", append(args, path)...)
 		out, err := cmd.CombinedOutput()
-		if len(out) > 0 {
-			log.Print(string(out))
-		}
 		if err != nil {
 			log.Println(strings.Join(cmd.Args, " "))
+			log.Println(string(out))
 			log.Fatalf("Unable to generate protoc on %s: %v", p.PackageName, err)
 		}
 
@@ -399,9 +395,9 @@ func importOrder(deps map[string][]string) ([]string, error) {
 	if len(remainingNodes) > 0 {
 		return nil, fmt.Errorf("cycle: remaining nodes: %#v, remaining edges: %#v", remainingNodes, graph)
 	}
-	for _, n := range sorted {
-		fmt.Println("topological order", n)
-	}
+	//for _, n := range sorted {
+	//	fmt.Println("topological order", n)
+	//}
 	return sorted, nil
 }
 

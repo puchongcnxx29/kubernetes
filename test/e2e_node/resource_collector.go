@@ -39,7 +39,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -370,7 +369,7 @@ func getCadvisorPod() *v1.Pod {
 }
 
 // deletePodsSync deletes a list of pods and block until pods disappear.
-func deletePodsSync(f *framework.Framework, pods []*v1.Pod) {
+func deletePodsSync(ctx context.Context, f *framework.Framework, pods []*v1.Pod) {
 	var wg sync.WaitGroup
 	for i := range pods {
 		pod := pods[i]
@@ -379,13 +378,12 @@ func deletePodsSync(f *framework.Framework, pods []*v1.Pod) {
 			defer ginkgo.GinkgoRecover()
 			defer wg.Done()
 
-			err := f.PodClient().Delete(context.TODO(), pod.ObjectMeta.Name, *metav1.NewDeleteOptions(30))
+			err := e2epod.NewPodClient(f).Delete(ctx, pod.ObjectMeta.Name, *metav1.NewDeleteOptions(30))
 			if apierrors.IsNotFound(err) {
 				framework.Failf("Unexpected error trying to delete pod %s: %v", pod.Name, err)
 			}
 
-			gomega.Expect(e2epod.WaitForPodToDisappear(f.ClientSet, f.Namespace.Name, pod.ObjectMeta.Name, labels.Everything(),
-				30*time.Second, 10*time.Minute)).NotTo(gomega.HaveOccurred())
+			framework.ExpectNoError(e2epod.WaitForPodNotFoundInNamespace(ctx, f.ClientSet, pod.ObjectMeta.Name, f.Namespace.Name, 10*time.Minute))
 		}()
 	}
 	wg.Wait()
@@ -482,18 +480,18 @@ func getPidsForProcess(name, pidFile string) ([]int, error) {
 func getPidFromPidFile(pidFile string) (int, error) {
 	file, err := os.Open(pidFile)
 	if err != nil {
-		return 0, fmt.Errorf("error opening pid file %s: %v", pidFile, err)
+		return 0, fmt.Errorf("error opening pid file %s: %w", pidFile, err)
 	}
 	defer file.Close()
 
 	data, err := io.ReadAll(file)
 	if err != nil {
-		return 0, fmt.Errorf("error reading pid file %s: %v", pidFile, err)
+		return 0, fmt.Errorf("error reading pid file %s: %w", pidFile, err)
 	}
 
 	pid, err := strconv.Atoi(string(data))
 	if err != nil {
-		return 0, fmt.Errorf("error parsing %s as a number: %v", string(data), err)
+		return 0, fmt.Errorf("error parsing %s as a number: %w", string(data), err)
 	}
 
 	return pid, nil

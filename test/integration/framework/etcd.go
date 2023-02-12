@@ -36,8 +36,6 @@ import (
 	"k8s.io/kubernetes/pkg/util/env"
 )
 
-var etcdURL = ""
-
 const installEtcd = `
 Cannot find etcd, cannot run integration tests
 Please see https://git.k8s.io/community/contributors/devel/sig-testing/integration-tests.md#install-etcd-dependency for instructions.
@@ -70,7 +68,7 @@ func startEtcd() (func(), error) {
 		os.Setenv("ETCD_UNSUPPORTED_ARCH", "arm64")
 	}
 
-	etcdURL = env.GetEnvAsStringOrFallback("KUBE_INTEGRATION_ETCD_URL", "http://127.0.0.1:2379")
+	etcdURL := env.GetEnvAsStringOrFallback("KUBE_INTEGRATION_ETCD_URL", "http://127.0.0.1:2379")
 	conn, err := net.Dial("tcp", strings.TrimPrefix(etcdURL, "http://"))
 	if err == nil {
 		klog.Infof("etcd already running at %s", etcdURL)
@@ -84,8 +82,7 @@ func startEtcd() (func(), error) {
 		return nil, err
 	}
 
-	etcdURL = currentURL
-	os.Setenv("KUBE_INTEGRATION_ETCD_URL", etcdURL)
+	os.Setenv("KUBE_INTEGRATION_ETCD_URL", currentURL)
 
 	return stop, nil
 }
@@ -194,11 +191,13 @@ func EtcdMain(tests func() int) {
 	stop() // Don't defer this. See os.Exit documentation.
 
 	checkNumberOfGoroutines := func() (bool, error) {
-		// Leave some room for goroutines we can not get rid of
-		// like k8s.io/klog/v2.(*loggingT).flushDaemon()
-		// TODO(#108483): Reduce this number once we address the
-		//   couple remaining issues.
-		if dg := runtime.NumGoroutine() - before; dg <= 15 {
+		// We leave some room for leaked goroutines as there are
+		// still some leaks, mostly:
+		// - leak from lumberjack package we're vendoring
+		// - leak from apiserve healthz
+		// - leak from opencensus library
+		// Once fixed, we should be able to bring it down to zero.
+		if dg := runtime.NumGoroutine() - before; dg <= 3 {
 			return true, nil
 		}
 		// Allow goroutines to schedule and die off.
@@ -210,12 +209,14 @@ func EtcdMain(tests func() int) {
 	// But we keep the limit higher to account for cpu-starved environments.
 	if err := wait.Poll(100*time.Millisecond, 5*time.Second, checkNumberOfGoroutines); err != nil {
 		after := runtime.NumGoroutine()
-		klog.Fatalf("unexpected number of goroutines: before: %d after %d", before, after)
+		stacktraces := make([]byte, 1<<20)
+		runtime.Stack(stacktraces, true)
+		klog.Fatalf("unexpected number of goroutines: before: %d after %d\n%sd", before, after, string(stacktraces))
 	}
 	os.Exit(result)
 }
 
 // GetEtcdURL returns the URL of the etcd instance started by EtcdMain.
 func GetEtcdURL() string {
-	return etcdURL
+	return env.GetEnvAsStringOrFallback("KUBE_INTEGRATION_ETCD_URL", "http://127.0.0.1:2379")
 }
